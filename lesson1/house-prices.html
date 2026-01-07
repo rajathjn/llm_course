@@ -1,0 +1,200 @@
+<html>
+<head>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@2.0.0/dist/tf.min.js"></script>
+
+<!-- Import tfjs-vis -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-vis@1.0.2/dist/tfjs-vis.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.1/papaparse.min.js"></script>
+
+</head>
+<body>
+	<div id='calc'>
+		<label for="Area">Enter your livable area:</label><br>
+		<input type="text" id="area"  value=""><br>
+		<button id="quote">Get Estimate</button>
+		<div id='output_field'></div>
+	</div>
+</body>
+<script>
+Papa.parsePromise = function(file) {
+   return new Promise(resolve => {
+      Papa.parse(file, {
+      		 download: true,
+      		 header: true,
+		     skipEmptyLines: true,
+             complete: results => {
+               resolve(results.data);
+   	  	    }
+   	  });
+  });
+};
+
+//get housing dataset
+async function getData() {
+	const csvUrl = "https://raw.githubusercontent.com/curiousily/Linear-Regression-with-TensorFlow-js/master/src/data/housing.csv";
+  	const data = await Papa.parsePromise(csvUrl);
+  	return data;
+};
+
+
+
+function arraytoTensor(data) {
+		const inputs = data.map(d => parseInt(d.GrLivArea))
+		const labels = data.map(d => parseInt(d.SalePrice));
+
+		const inputTensor = tf.tensor2d(inputs, [inputs.length, 1]);
+		const labelTensor = tf.tensor2d(labels, [labels.length, 1]);
+
+		//Step 3. Normalize the data to the range 0 - 1 using min-max scaling
+		const inputMax = inputTensor.max();
+		const inputMin = inputTensor.min();
+		const labelMax = labelTensor.max();
+		const labelMin = labelTensor.min();
+
+		const normalizedInputs = inputTensor.sub(inputMin).div(inputMax.sub(inputMin));
+		const normalizedLabels = labelTensor.sub(labelMin).div(labelMax.sub(labelMin));
+
+		return {
+			inputs:	normalizedInputs,
+			labels:	normalizedLabels,
+			// Return the min/max bounds so we can use them later.
+			inputMax,
+			inputMin,
+			labelMin,
+			labelMax,
+    	}
+}
+
+
+function testModel(model, inputData,normalizationData) {
+  const {inputMax, inputMin, labelMin, labelMax} = normalizationData;
+
+  // Generate predictions for a uniform range of numbers between 0 and 1;
+  const [xs, preds] = tf.tidy(() => {
+
+    const xs = tf.linspace(0, 1, 100);
+    const preds = model.predict(xs.reshape([100, 1]));
+	xs.array().then(array => console.log(array));
+	preds.data().then(data => console.log(data));
+
+	const unNormXs = xs.mul(inputMax.sub(inputMin)).add(inputMin);
+    const unNormPreds = preds.mul(labelMax.sub(labelMin)).add(labelMin);
+
+    return [unNormXs.dataSync(), unNormPreds.dataSync()];
+  });
+
+  const predictedPoints = Array.from(xs).map((val, i) => {
+    return {x: val, y: preds[i]}
+  });
+
+  const originalPoints = inputData.map(d => ({
+    x: d.GrLivArea, y: d.SalePrice,
+  }));
+
+
+  tfvis.render.scatterplot(
+    {name: 'Model Predictions vs Original Data'},
+    {values: [originalPoints, predictedPoints], series: ['original', 'predicted']},
+    {
+      xLabel: 'Livable Area',
+      yLabel: 'Sale Price',
+      height: 300
+    }
+  );
+
+}
+
+function createModel() {
+
+	const model= tf.sequential();
+	// Add a single input layer
+	model.add(tf.layers.dense({units :1 , inputShape:[1],useBias: true,activation: 'relu'}));
+	//add a hidden layer
+	model.add(tf.layers.dense({units :16 ,useBias: true,activation: 'relu'}));
+	// Add an output layer
+	model.add(tf.layers.dense({units :1,useBias: true }));
+	return model
+}
+
+async function trainModel(model, inputs, labels) {
+	model.compile({ loss: tf.losses.meanSquaredError,
+    metrics: ['mse'],
+    optimizer: tf.train.adam(.00005) });
+
+    const batchSize = 32;
+    const epochs = 250;
+	console.log("inside train model")
+	inputs.array().then(array => console.log(array));
+	labels.array().then(array => console.log(array));
+
+	return await model.fit(inputs, labels, {
+	    batchSize,
+    	epochs,
+    	shuffle: true,
+    	callbacks: tfvis.show.fitCallbacks(
+		    { name: 'Training Performance' },
+		    ['loss', 'mse'],
+		    { height: 200, callbacks: ['onEpochEnd'] }
+  		)
+    });
+}
+
+let g_inputMax, g_inputMin, g_labelMin, g_labelMax;
+async function run() {
+
+	document.getElementById("quote").disabled=true
+	//hide the calculator fields till training is done
+	document.getElementById("calc").style.display = "none";
+
+	// Load and plot the original input data that we are going to train on.
+  	const data = await getData();
+
+ 	//visualize
+    const values = data.map(d => ({
+	    x: d.GrLivArea,
+	    y: d.SalePrice,
+    }));
+
+    tfvis.render.scatterplot(
+	    {name: 'Livable Area v Sale Price'},
+	    {values},
+	    {
+	      xLabel: 'Livable Area',
+	      yLabel: 'Sale Price',
+	      height: 300
+	    }
+  	);
+
+    //normalize the data and convert to tensors
+	tensorData=arraytoTensor(data)
+	const {inputs, labels} = tensorData;
+
+	// Create the model
+	model = createModel();
+	//visualize it
+	tfvis.show.modelSummary({name: 'Model Summary'}, model);
+
+	// Train the model
+	await trainModel(model, inputs, labels);
+	console.log('Done Training');
+	testModel(model,data,tensorData)
+	g_inputMax=tensorData.inputMax, g_inputMin=tensorData.inputMin, g_labelMin=tensorData.labelMin, g_labelMax= tensorData.labelMax;
+	await model.save('localstorage://homeprices-model');
+	document.getElementById("quote").disabled=false
+	document.getElementById("calc").style.display = "block";
+
+}
+document.addEventListener('DOMContentLoaded', run);
+document.getElementById("quote").addEventListener("click",process);
+async function process() {
+	area=parseInt(document.getElementById("area").value)
+	const inputTens = tf.tensor2d([area], [1, 1]);
+	const normalized_entry = inputTens.sub(g_inputMin).div(g_inputMax.sub(g_inputMin));
+	const model = await tf.loadLayersModel('localstorage://homeprices-model');
+	p=model.predict(normalized_entry)
+    un_p = p.mul(g_labelMax.sub(g_labelMin)).add(g_labelMin);
+	un_p.data().then(data => document.getElementById('output_field').innerText=data);
+
+}
+</script>
+</html>
